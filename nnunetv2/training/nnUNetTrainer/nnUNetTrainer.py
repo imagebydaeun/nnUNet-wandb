@@ -1,6 +1,7 @@
 import inspect
 import multiprocessing
 import os
+import yaml
 import shutil
 import sys
 import warnings
@@ -8,6 +9,7 @@ from copy import deepcopy
 from datetime import datetime
 from time import time, sleep
 from typing import Tuple, Union, List
+from nnunetv2.training.nnUNetTrainer.WandbWrapper import WandbWrapper
 
 import numpy as np
 import torch
@@ -143,15 +145,15 @@ class nnUNetTrainer(object):
                  self.configuration_manager.previous_stage_name, 'predicted_next_stage', self.configuration_name) \
                 if self.is_cascaded else None
 
-        ### Some hyperparameters for you to fiddle with
-        self.initial_lr = 1e-2
-        self.weight_decay = 3e-5
-        self.oversample_foreground_percent = 0.33
-        self.num_iterations_per_epoch = 250
-        self.num_val_iterations_per_epoch = 50
-        self.num_epochs = 1000
-        self.current_epoch = 0
-        self.enable_deep_supervision = True
+        # ### Some hyperparameters for you to fiddle with  <- deleted for nnunet-wandb integration (parameter info at config.yaml)
+        # self.initial_lr = 1e-2
+        # self.weight_decay = 3e-5
+        # self.oversample_foreground_percent = 0.33
+        # self.num_iterations_per_epoch = 250
+        # self.num_val_iterations_per_epoch = 50
+        # self.num_epochs = 1000
+        # self.current_epoch = 0
+        # self.enable_deep_supervision = True
 
         ### Dealing with labels/regions
         self.label_manager = self.plans_manager.get_label_manager(dataset_json)
@@ -201,6 +203,23 @@ class nnUNetTrainer(object):
                                "Nature methods, 18(2), 203-211.\n"
                                "#######################################################################\n",
                                also_print_to_console=True, add_timestamp=False)
+
+        # Hyperparameters initialization <- added for nnunet-wandb intergration (import parameters from config.yaml)
+        yaml_config = yaml.safe_load(open("nnunetv2/training/nnUNetTrainer/config.yaml"))
+        yaml_config['architecture'] = configuration
+        yaml_config['fold'] = fold
+        self.num_epochs = yaml_config['num_epochs']
+        self.initial_lr = yaml_config['initial_lr']
+        self.weight_decay = yaml_config['weight_decay']
+        self.num_iterations_per_epoch = yaml_config['num_iterations_per_epoch']
+        self.num_val_iterations_per_epoch = yaml_config['num_val_iterations_per_epoch']
+        self.oversample_foreground_percent = yaml_config['oversample_foreground_percent']
+        self.enable_deep_supervision = yaml_config['enable_deep_supervision']
+        self.current_epoch = 0  ## Dynamic variable not stored in yaml config
+
+        # WandbWrapper initialization
+        self.wandb = WandbWrapper(use_wandb=yaml_config['wandb_enabled'], config=yaml_config)
+        self.wandb.init()
 
     def initialize(self):
         if not self.was_initialized:
@@ -964,6 +983,7 @@ class nnUNetTrainer(object):
 
         empty_cache(self.device)
         self.print_to_log_file("Training done.")
+        self.wandb.finish()
 
     def on_train_epoch_start(self):
         self.network.train()
@@ -1005,6 +1025,8 @@ class nnUNetTrainer(object):
             l.backward()
             torch.nn.utils.clip_grad_norm_(self.network.parameters(), 12)
             self.optimizer.step()
+
+        self.wandb.log({"training_loss_per_it": l.detach().cpu().numpy()})
         return {'loss': l.detach().cpu().numpy()}
 
     def on_train_epoch_end(self, train_outputs: List[dict]):
@@ -1132,6 +1154,24 @@ class nnUNetTrainer(object):
         self.print_to_log_file('val_loss', np.round(self.logger.my_fantastic_logging['val_losses'][-1], decimals=4))
         self.print_to_log_file('Pseudo dice', [np.round(i, decimals=4) for i in
                                                self.logger.my_fantastic_logging['dice_per_class_or_region'][-1]])
+
+        ######## This part added for nnunet-wandb integration ########
+        self.wandb.log({"epoch": self.current_epoch, "val_loss": self.logger.my_fantastic_logging['val_losses'][-1],"training_loss": self.logger.my_fantastic_logging['train_losses'][-1], "lr": self.optimizer.param_groups[0]['lr']})
+        all_dice = [np.round(i, decimals=4) for i in self.logger.my_fantastic_logging['dice_per_class_or_region'][-1]]
+        dice_val = np.average(all_dice) # exclude background in the average dice
+        self.wandb.log({"Average Dice": np.round(dice_val, decimals=4)})
+
+        for label_name, label_idx in self.dataset_json['labels'].items():
+            # Skip the 'background' or any label with index 0
+            if label_idx == 0:
+                continue
+
+            all_dice_idx = label_idx - 1
+            if 0 <= all_dice_idx < len(all_dice):
+                dice_score = np.round(all_dice[all_dice_idx], decimals=4)
+                self.wandb.log({f"{label_name} Dice": dice_score})
+        #################################################################
+        
         self.print_to_log_file(
             f"Epoch time: {np.round(self.logger.my_fantastic_logging['epoch_end_timestamps'][-1] - self.logger.my_fantastic_logging['epoch_start_timestamps'][-1], decimals=2)} s")
 
@@ -1145,6 +1185,8 @@ class nnUNetTrainer(object):
             self._best_ema = self.logger.my_fantastic_logging['ema_fg_dice'][-1]
             self.print_to_log_file(f"Yayy! New best EMA pseudo Dice: {np.round(self._best_ema, decimals=4)}")
             self.save_checkpoint(join(self.output_folder, 'checkpoint_best.pth'))
+
+            self.wandb.log({"best EMA pseudo Dice": np.round(self._best_ema, decimals=4)})
 
         if self.local_rank == 0:
             self.logger.plot_progress_png(self.output_folder)
