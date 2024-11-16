@@ -134,6 +134,27 @@ It is now also much easier to use it as a development framework and to manually 
 datasets. A big driver for the reimplementation was also the emergence of [Helmholtz Imaging](http://helmholtz-imaging.de), 
 prompting us to extend nnU-Net to more image formats and domains. Take a look [here](documentation/changelog.md) for some highlights.
 
+# Changes made for nnUNet-WandB integration
+1. config.yaml file created for configuration setup
+   - project_name: <Project Name>
+   - dataset: <dataset_name>
+   - wandb_enabled: 1
+     
+   - num_epochs: 1000
+   - initial_lr: 0.01
+   - weight_decay: 0.00003
+   - num_iterations_per_epoch: 250
+   - num_val_iterations_per_epoch: 50
+   - oversample_foreground_percent: 0.33
+   - enable_deep_supervision: 'True'
+2. WandbWrapper.py file created for wrapper class
+   - Initializes a WandB run only if use_wandb is True
+   - Calls wandb.init() to initialize a WandB session with:
+      project: The project name from the configuration
+      name: The unique run name
+      config: The configuration dictionary (to store hyperparameters and settings in WandB)
+4. nnUNetTrainer.py file edited to include nnunet integration
+
 # Acknowledgements
 <img src="documentation/assets/HI_Logo.png" height="100px" />
 
